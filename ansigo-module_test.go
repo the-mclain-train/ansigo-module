@@ -3,13 +3,38 @@ package ansiblemodule
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func TestNewModule(t *testing.T) {
+	// Save original stdin
+	oldStdin := os.Stdin
+
+	// Create a pipe for stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Failed to create pipe: %v", err)
+	}
+	os.Stdin = r
+
+	// Write test input in a goroutine
+	go func() {
+		defer w.Close()
+		jsonData := map[string]interface{}{
+			"_ansible_check_mode": true,
+			"_ansible_debug":      false,
+			"name":                "test",
+		}
+		if err := json.NewEncoder(w).Encode(jsonData); err != nil {
+			t.Errorf("Failed to write test input: %v", err)
+		}
+	}()
+
 	// Test basic module creation
 	argSpec := ArgSpecMap{
 		"name": ArgumentSpec{
@@ -24,6 +49,9 @@ func TestNewModule(t *testing.T) {
 	if module == nil {
 		t.Fatal("Module is nil")
 	}
+
+	// Restore original stdin
+	os.Stdin = oldStdin
 
 	// Test check mode validation
 	_, err = NewModule(argSpec, nil, nil, nil, nil, false)
@@ -56,15 +84,52 @@ func TestValidateArguments(t *testing.T) {
 				Type:     "str",
 				Required: true,
 			},
+			"age": ArgumentSpec{
+				Type:     "int",
+				Required: false,
+				Default:  25,
+			},
+			"enabled": ArgumentSpec{
+				Type:     "bool",
+				Required: false,
+				Default:  true,
+			},
+			"tags": ArgumentSpec{
+				Type:     "list",
+				Required: false,
+				Default:  []interface{}{"default"},
+			},
+			"config": ArgumentSpec{
+				Type: "dict",
+				Options: ArgSpecMap{
+					"host": ArgumentSpec{
+						Type:     "str",
+						Required: true,
+					},
+					"port": ArgumentSpec{
+						Type:     "int",
+						Required: false,
+						Default:  8080,
+					},
+				},
+			},
 		},
 		Params: ModuleParams{
-			"name": "test",
+			"name":    "test",
+			"age":     30,
+			"enabled": true,
+			"tags":    []interface{}{"test", "demo"},
+			"config": map[string]interface{}{
+				"host": "localhost",
+				"port": 9090,
+			},
 		},
 	}
 
+	// Test valid arguments
 	err := module.validateArguments()
 	if err != nil {
-		t.Errorf("Validation failed: %v", err)
+		t.Errorf("Validation failed for valid arguments: %v", err)
 	}
 
 	// Test missing required argument
@@ -72,6 +137,298 @@ func TestValidateArguments(t *testing.T) {
 	err = module.validateArguments()
 	if err == nil {
 		t.Error("Expected error for missing required argument")
+	}
+
+	// Test invalid type for name
+	module.Params = ModuleParams{
+		"name": 123, // Should be string
+	}
+	err = module.validateArguments()
+	if err == nil {
+		t.Error("Expected error for invalid type")
+	}
+
+	// Test invalid type for age
+	module.Params = ModuleParams{
+		"name": "test",
+		"age":  "not a number",
+	}
+	err = module.validateArguments()
+	if err == nil {
+		t.Error("Expected error for invalid age type")
+	}
+
+	// Test invalid type for enabled
+	module.Params = ModuleParams{
+		"name":    "test",
+		"enabled": "not a boolean",
+	}
+	err = module.validateArguments()
+	if err == nil {
+		t.Error("Expected error for invalid enabled type")
+	}
+
+	// Test invalid type for tags
+	module.Params = ModuleParams{
+		"name": "test",
+		"tags": 123, // Not a list or string
+	}
+	err = module.validateArguments()
+	if err == nil {
+		t.Error("Expected error for invalid tags type")
+	}
+
+	// Test invalid nested config
+	module.Params = ModuleParams{
+		"name": "test",
+		"config": map[string]interface{}{
+			"port": "not a number",
+		},
+	}
+	err = module.validateArguments()
+	if err == nil {
+		t.Error("Expected error for invalid nested config")
+	}
+
+	// Test missing required nested argument
+	module.Params = ModuleParams{
+		"name": "test",
+		"config": map[string]interface{}{
+			"port": 9090,
+		},
+	}
+	err = module.validateArguments()
+	if err == nil {
+		t.Error("Expected error for missing required nested argument")
+	}
+}
+
+func TestValidateArgument(t *testing.T) {
+	module := &AnsibleModule{
+		Params: make(ModuleParams),
+	}
+
+	tests := []struct {
+		name     string
+		value    interface{}
+		spec     ArgumentSpec
+		expected error
+	}{
+		{
+			name:  "valid string",
+			value: "test",
+			spec: ArgumentSpec{
+				Type: "str",
+			},
+			expected: nil,
+		},
+		{
+			name:  "invalid string type",
+			value: 123,
+			spec: ArgumentSpec{
+				Type: "str",
+			},
+			expected: fmt.Errorf("must be a string"),
+		},
+		{
+			name:  "valid boolean",
+			value: true,
+			spec: ArgumentSpec{
+				Type: "bool",
+			},
+			expected: nil,
+		},
+		{
+			name:  "valid boolean string",
+			value: "true",
+			spec: ArgumentSpec{
+				Type: "bool",
+			},
+			expected: nil,
+		},
+		{
+			name:  "invalid boolean",
+			value: "not a boolean",
+			spec: ArgumentSpec{
+				Type: "bool",
+			},
+			expected: fmt.Errorf("must be a boolean"),
+		},
+		{
+			name:  "valid integer",
+			value: 123,
+			spec: ArgumentSpec{
+				Type: "int",
+			},
+			expected: nil,
+		},
+		{
+			name:  "valid integer string",
+			value: "123",
+			spec: ArgumentSpec{
+				Type: "int",
+			},
+			expected: nil,
+		},
+		{
+			name:  "invalid integer",
+			value: "not a number",
+			spec: ArgumentSpec{
+				Type: "int",
+			},
+			expected: fmt.Errorf("must be an integer"),
+		},
+		{
+			name:  "valid float",
+			value: 123.45,
+			spec: ArgumentSpec{
+				Type: "float",
+			},
+			expected: nil,
+		},
+		{
+			name:  "valid float string",
+			value: "123.45",
+			spec: ArgumentSpec{
+				Type: "float",
+			},
+			expected: nil,
+		},
+		{
+			name:  "invalid float",
+			value: "not a number",
+			spec: ArgumentSpec{
+				Type: "float",
+			},
+			expected: fmt.Errorf("must be a float"),
+		},
+		{
+			name:  "valid list",
+			value: []interface{}{"item1", "item2"},
+			spec: ArgumentSpec{
+				Type: "list",
+			},
+			expected: nil,
+		},
+		{
+			name:  "valid list string",
+			value: "item1,item2",
+			spec: ArgumentSpec{
+				Type: "list",
+			},
+			expected: nil,
+		},
+		{
+			name:  "invalid list",
+			value: 123, // Not a list or string
+			spec: ArgumentSpec{
+				Type: "list",
+			},
+			expected: fmt.Errorf("must be a list"),
+		},
+		{
+			name:  "valid dict",
+			value: map[string]interface{}{"key": "value"},
+			spec: ArgumentSpec{
+				Type: "dict",
+			},
+			expected: nil,
+		},
+		{
+			name:  "invalid dict",
+			value: "not a dict",
+			spec: ArgumentSpec{
+				Type: "dict",
+			},
+			expected: fmt.Errorf("must be a dictionary/map"),
+		},
+		{
+			name:  "valid path",
+			value: "/path/to/file",
+			spec: ArgumentSpec{
+				Type: "path",
+			},
+			expected: nil,
+		},
+		{
+			name:  "invalid path",
+			value: 123,
+			spec: ArgumentSpec{
+				Type: "path",
+			},
+			expected: fmt.Errorf("must be a path string"),
+		},
+		{
+			name:  "valid choice",
+			value: "option1",
+			spec: ArgumentSpec{
+				Type:    "str",
+				Choices: []string{"option1", "option2"},
+			},
+			expected: nil,
+		},
+		{
+			name:  "invalid choice",
+			value: "option3",
+			spec: ArgumentSpec{
+				Type:    "str",
+				Choices: []string{"option1", "option2"},
+			},
+			expected: fmt.Errorf("must be one of"),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := module.validateArgument(test.name, test.value, test.spec)
+			if test.expected == nil {
+				if err != nil {
+					t.Errorf("Expected no error, got: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Error("Expected error, got nil")
+				} else if !strings.Contains(err.Error(), test.expected.Error()) {
+					t.Errorf("Expected error containing '%s', got: %v", test.expected.Error(), err)
+				}
+			}
+		})
+	}
+}
+
+func TestAddWarningAndDeprecation(t *testing.T) {
+	module := &AnsibleModule{}
+
+	// Test AddWarning
+	warningMsg := "This is a test warning"
+	module.AddWarning(warningMsg)
+	if len(module.Warnings) != 1 {
+		t.Errorf("Expected 1 warning, got %d", len(module.Warnings))
+	}
+	if module.Warnings[0] != warningMsg {
+		t.Errorf("Expected warning '%s', got '%s'", warningMsg, module.Warnings[0])
+	}
+
+	// Test AddDeprecation without version
+	deprecationMsg := "This feature is deprecated"
+	module.AddDeprecation(deprecationMsg, "")
+	if len(module.DeprecationMsgs) != 1 {
+		t.Errorf("Expected 1 deprecation message, got %d", len(module.DeprecationMsgs))
+	}
+	if module.DeprecationMsgs[0] != deprecationMsg {
+		t.Errorf("Expected deprecation message '%s', got '%s'", deprecationMsg, module.DeprecationMsgs[0])
+	}
+
+	// Test AddDeprecation with version
+	versionedMsg := "This feature will be removed"
+	version := "2.0.0"
+	module.AddDeprecation(versionedMsg, version)
+	if len(module.DeprecationMsgs) != 2 {
+		t.Errorf("Expected 2 deprecation messages, got %d", len(module.DeprecationMsgs))
+	}
+	expectedVersionedMsg := fmt.Sprintf("%s (version: %s)", versionedMsg, version)
+	if module.DeprecationMsgs[1] != expectedVersionedMsg {
+		t.Errorf("Expected versioned deprecation message '%s', got '%s'", expectedVersionedMsg, module.DeprecationMsgs[1])
 	}
 }
 
