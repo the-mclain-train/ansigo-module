@@ -315,6 +315,10 @@ func (m *AnsibleModule) validateArgument(name string, value interface{}, spec Ar
 				if err != nil {
 					return fmt.Errorf("%s must be a boolean: %v", name, err)
 				}
+				// Update the value in the params map
+				if m.Params == nil {
+					m.Params = make(ModuleParams)
+				}
 				m.Params[name] = boolVal
 			} else if _, ok := value.(bool); !ok {
 				return fmt.Errorf("%s must be a boolean", name)
@@ -326,11 +330,18 @@ func (m *AnsibleModule) validateArgument(name string, value interface{}, spec Ar
 				if err != nil {
 					return fmt.Errorf("%s must be an integer: %v", name, err)
 				}
+				// Update the value in the params map
+				if m.Params == nil {
+					m.Params = make(ModuleParams)
+				}
 				m.Params[name] = intVal
 			} else if _, ok := value.(int); !ok {
 				// Try to convert from float if it's a whole number
 				if floatVal, ok := value.(float64); ok {
 					if floatVal == float64(int(floatVal)) {
+						if m.Params == nil {
+							m.Params = make(ModuleParams)
+						}
 						m.Params[name] = int(floatVal)
 					} else {
 						return fmt.Errorf("%s must be an integer", name)
@@ -346,27 +357,51 @@ func (m *AnsibleModule) validateArgument(name string, value interface{}, spec Ar
 				if err != nil {
 					return fmt.Errorf("%s must be a float: %v", name, err)
 				}
+				// Update the value in the params map
+				if m.Params == nil {
+					m.Params = make(ModuleParams)
+				}
 				m.Params[name] = floatVal
 			} else if _, ok := value.(float64); !ok {
 				// Try to convert from int
 				if intVal, ok := value.(int); ok {
+					if m.Params == nil {
+						m.Params = make(ModuleParams)
+					}
 					m.Params[name] = float64(intVal)
 				} else {
 					return fmt.Errorf("%s must be a float", name)
 				}
 			}
 		case "list", "array":
-			// Verify it's a list/array
+			// Verify it's a list/array or can be converted to one
 			if _, ok := value.([]interface{}); !ok {
-				// Try to convert from comma-separated string
-				if strVal, ok := value.(string); ok {
+				// Try to convert from string array
+				if strArr, ok := value.([]string); ok {
+					// Convert []string to []interface{}
+					interfaceArr := make([]interface{}, len(strArr))
+					for i, v := range strArr {
+						interfaceArr[i] = v
+					}
+					if m.Params == nil {
+						m.Params = make(ModuleParams)
+					}
+					m.Params[name] = interfaceArr
+				} else if strVal, ok := value.(string); ok {
+					// Try to convert from comma-separated string
 					if strVal == "" {
+						if m.Params == nil {
+							m.Params = make(ModuleParams)
+						}
 						m.Params[name] = []interface{}{}
 					} else {
 						items := strings.Split(strVal, ",")
 						itemsInterface := make([]interface{}, len(items))
 						for i, item := range items {
 							itemsInterface[i] = strings.TrimSpace(item)
+						}
+						if m.Params == nil {
+							m.Params = make(ModuleParams)
 						}
 						m.Params[name] = itemsInterface
 					}
